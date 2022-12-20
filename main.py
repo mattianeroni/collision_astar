@@ -20,8 +20,9 @@ if __name__ == '__main__':
     G.add_edge(2, 3, weight=euclidean(G, 2, 3), risk=20)
     
 
-    path = collision_astar(G, 0, 3, heuristic=euclidean, alpha=1000.0, weight='weight', risk='risk')
+    path, tw = collision_astar(G, 0, 3, heuristic=euclidean, alpha=10.0, weight='weight', risk='risk')
     print(path)
+    print(tw)
 
     plot_path(G, path)    
     

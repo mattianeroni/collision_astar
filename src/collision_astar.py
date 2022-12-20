@@ -38,12 +38,7 @@ def _time_function (G, time, weight_function):
             key=weight_function(u, v, d)
         )
 
-    return lambda u, v, data: data.get(time, weight_function(u, v, d))
-
-
-
-def compute_path (source, target):
-    pass
+    return lambda u, v, data: data.get(time, weight_function(u, v, data))
 
 
 
@@ -57,6 +52,37 @@ def _time_windows_function (G, time_windows):
         )
 
     return lambda u, v, data: data.get(time_windows, tuple())
+
+
+
+def interested_time_window (ctime, time_windows):
+    """ Check through a set of time windows if one of them
+    interests the current travel """
+    return next((i for i in time_windows if i[0] <= ctime < i[1]), None)
+
+
+
+def build_path (curnode, tree, time_windows):
+    """ 
+    Method to reconstruct the path starting from the current node.
+    :param target: The target node id 
+    :param tree: The dict of explored nodes --i.e., tree[child] = parent
+    :param time_windows: The dictionary of time windows associated with 
+                         current exploration --i.e., tw[edge] = time_window
+    :return: The path from source to target as a list of nodes ids, and
+            the time windows associated with edges.
+    """
+    path = [curnode]
+    node = tree[curnode]
+    windows = {(node, curnode) : time_windows[node, curnode]}
+    while node is not None:
+        path.append(node)
+        parent = tree[node]
+        if parent is not None:
+            windows[parent, node] = time_windows[parent, node]
+        node = parent
+    path.reverse()
+    return path, windows
 
 
 
@@ -108,8 +134,7 @@ def collision_astar (G, source, target, heuristic=None, alpha=0.0,
     :return: A list of nodes id belonging to the shortest path.    
     """
     if source not in G or target not in G:
-        msg = f"Either source {source} or target {target} is not in G"
-        raise nx.NodeNotFound(msg)
+        raise nx.NodeNotFound(f"Either source {source} or target {target} is not in G")
 
     if heuristic is None:
         # The default heuristic is h=0 - same as Dijkstra's algorithm
@@ -123,34 +148,32 @@ def collision_astar (G, source, target, heuristic=None, alpha=0.0,
     get_time = _time_function(G, time, get_weight)
     get_time_windows = _time_windows_function(G, time_windows)
 
-    # The queue stores priority, counter, node, cost to reach node, risk to reach node, and parent.
+    # The queue stores priority, counter, node, cost to reach node, risk 
+    # to reach node, time to reach node and parent.
     # Uses Python heapq to keep in priority order.
     # Add a counter to the queue to prevent the underlying heap from
     # attempting to compare the nodes themselves. The hash breaks ties in the
     # priority and is guaranteed unique for all nodes in the graph.
     c = count()
-    queue = [(0, next(c), source, 0, 0, None)]
+    queue = [(0, next(c), source, 0, 0, 0, None)]
 
     # Maps enqueued nodes to (distance + alpha * risk) and heuristic estimation.
     # In this way, we avoid computing the heuristics more than once.
     enqueued = {}
     # Maps explored nodes to parent closest to the source.
     explored = {}
+    # Maps each visited edge to a time window in which the current trip will keep it busy.
+    windows = {}
 
     while queue:
         # Pop the smallest item from queue.
-        # (priority, counter, node, cumulate distance, cumulate risk, parent)
-        _, __, curnode, cdist, crisk, parent = pop(queue)
+        # (priority, counter, node, cumulate distance, cumulate risk, cumulate time, parent)
+        _, __, curnode, cdist, crisk, ctime, parent = pop(queue)
 
         # Reach the target
         if curnode == target:
-            path = [curnode]
-            node = parent
-            while node is not None:
-                path.append(node)
-                node = explored[node]
-            path.reverse()
-            return path
+            explored[curnode] = parent
+            return build_path(target, explored, windows)
 
         if curnode in explored:
             # Do not override the parent of starting node
@@ -166,18 +189,35 @@ def collision_astar (G, source, target, heuristic=None, alpha=0.0,
 
         for neighbor, w in G[curnode].items():
 
-            # Get cost, risk, and travel time associated with new edge
+            # Get cost (if cost is None this arc cannot be covered)
             cost = get_weight(curnode, neighbor, w)
-            risk = get_risk(curnode, neighbor, w)
-            time = get_time(curnode, neighbor, w)
-            
-            # If cost is None this arc cannot be covered
             if cost is None:
                 continue
 
+            # Get also risk, travel time, and time windows associated with edge
+            risk = get_risk(curnode, neighbor, w)
+            time = get_time(curnode, neighbor, w)
+            time_windows_list = get_time_windows(curnode, neighbor, w)
+
+            # Compute cost, risk, and time if that edge is covered
             new_cost = cdist + cost
             new_risk = crisk + risk
-            new_value = ncost + alpha * nrisk
+            new_value = new_cost + alpha * new_risk
+            # Time when edge (curnode, neighbor) is entered and exited
+            entry_t, exit_t = 0, 0   
+
+            # Adjust time windows associated with considered arcs
+            if (tw := interested_time_window(ctime, time_windows_list)) is None:
+                new_time = ctime + time
+                entry_t, exit_t = ctime, new_time
+            else:
+                tw_init, tw_end = tw
+                new_time = tw_end + time
+                windows[parent, curnode][1] = tw_end
+                entry_t, exit_t = tw_end, new_time
+            
+            # Update time window when edge (curnode, neighbor) is covered
+            windows[curnode, neighbor] = [entry_t, exit_t]
 
             if neighbor in enqueued:
                 cost, h, r = enqueued[neighbor]
@@ -190,6 +230,6 @@ def collision_astar (G, source, target, heuristic=None, alpha=0.0,
                 h = heuristic(G, neighbor, target)
                 
             enqueued[neighbor] = (new_cost, h, new_risk)
-            push(queue, (new_value + h, next(c), neighbor, new_cost, new_risk, curnode))
+            push(queue, (new_value + h, next(c), neighbor, new_cost, new_risk, new_time, curnode))
 
     raise nx.NetworkXNoPath(f"Node {target} not reachable from {source}")
