@@ -22,6 +22,30 @@ def _risk_function(G, risk):
     return lambda u, v, data: data.get(risk, 0)
 
 
+def _time_function (G, time, weight_function):
+    """ Returns a function that returns the travel time of an edge.
+    It workd similarly to networkx _weight_function. """
+    # If risk is already a function...
+    if callable(time):
+        return time
+
+    # If the weight keyword argument is not callable, we assume it is a
+    # string representing the edge attribute containing the weight of
+    # the edge.
+    if G.is_multigraph():
+        return lambda u, v, d: min(
+            iterable=(attr.get(time, weight_function(u, v, d)) for attr in d.values()),
+            key=weight_function(u, v, d)
+        )
+
+    return lambda u, v, data: data.get(time, weight_function(u, v, d))
+
+
+
+def compute_path (source, target):
+    pass
+
+
 
 def _time_windows_function (G, time_windows):
     """ Returns a function that returns the busy time windows of an edge.
@@ -37,7 +61,7 @@ def _time_windows_function (G, time_windows):
 
 
 def collision_astar (G, source, target, heuristic=None, alpha=0.0,
-    weight="weight", risk="risk", time_windows="time_windows"):
+    weight="weight", risk="risk", time="time", time_windows="time_windows"):
     
     """ 
     An implementation of A* (A-star) algorithm that consider additional aspects
@@ -70,6 +94,15 @@ def collision_astar (G, source, target, heuristic=None, alpha=0.0,
         an edge and the dictionary of edge attributes for that edge. The function must
         return a number.
 
+    :param time: String of function describing the edges travel time. If this is a string, 
+        then edge risks will be accessed via the edge attribute with this key (that 
+        is, the risk of the edge joining `u` to `v` will be ``G.edges[u, v][risk]``). 
+        If no such edge attribute exists, the risk of the edge is assumed to be equal 
+        to the weight. If this is a function, the risk of an edge is the value returned 
+        by the function. The function must accept exactly three positional arguments: 
+        the two endpoints of an edge and the dictionary of edge attributes for that edge. 
+        The function must return a number.
+
     :param time_windows: String saying which attribute of the edges is a list of time windows
 
     :return: A list of nodes id belonging to the shortest path.    
@@ -87,6 +120,7 @@ def collision_astar (G, source, target, heuristic=None, alpha=0.0,
     pop = heappop
     get_weight = _weight_function(G, weight)
     get_risk = _risk_function(G, risk)
+    get_time = _time_function(G, time, get_weight)
     get_time_windows = _time_windows_function(G, time_windows)
 
     # The queue stores priority, counter, node, cost to reach node, risk to reach node, and parent.
@@ -97,17 +131,16 @@ def collision_astar (G, source, target, heuristic=None, alpha=0.0,
     c = count()
     queue = [(0, next(c), source, 0, 0, None)]
 
-    # Maps enqueued nodes to distance of discovered paths and the
-    # computed heuristics to target. 
-    # We avoid computing the heuristics more than once and inserting 
-    # the node into the queue too many times.
+    # Maps enqueued nodes to (distance + alpha * risk) and heuristic estimation.
+    # In this way, we avoid computing the heuristics more than once.
     enqueued = {}
     # Maps explored nodes to parent closest to the source.
     explored = {}
 
     while queue:
         # Pop the smallest item from queue.
-        _, __, curnode, totalcost, totalrisk, parent = pop(queue)
+        # (priority, counter, node, cumulate distance, cumulate risk, parent)
+        _, __, curnode, cdist, crisk, parent = pop(queue)
 
         # Reach the target
         if curnode == target:
@@ -125,37 +158,38 @@ def collision_astar (G, source, target, heuristic=None, alpha=0.0,
                 continue
 
             # Skip bad paths that were enqueued before finding a better one
-            qcost, h, r = enqueued[curnode]
-            if qcost < totalcost:
+            cost, h, r = enqueued[curnode]
+            if cost + alpha * r < cdist + alpha * crisk:
                 continue
 
         explored[curnode] = parent
 
         for neighbor, w in G[curnode].items():
 
-            # Get cost and risk associated to new edge
+            # Get cost, risk, and travel time associated with new edge
             cost = get_weight(curnode, neighbor, w)
             risk = get_risk(curnode, neighbor, w)
+            time = get_time(curnode, neighbor, w)
             
             # If cost is None this arc cannot be covered
             if cost is None:
                 continue
 
-            ncost = totalcost + cost
-            nrisk = totalrisk + risk
-            n_cost_and_risk = ncost + alpha * nrisk
+            new_cost = cdist + cost
+            new_risk = crisk + risk
+            new_value = ncost + alpha * nrisk
 
             if neighbor in enqueued:
-                qcost, h, r = enqueued[neighbor]
-                # If the weighted 
-                # Therefore, we won't attempt to push this neighbor
-                # to the queue.
-                if qcost + alpha * r <= n_cost_and_risk:
+                cost, h, r = enqueued[neighbor]
+                # If the weighted value --i.e., distance + alpha * risk -- does 
+                # not provide any significant improvement, we won't attempt to 
+                # push this neighbor to the queue.
+                if cost + alpha * r <= new_value:
                     continue
             else:
                 h = heuristic(G, neighbor, target)
                 
-            enqueued[neighbor] = (ncost, h, nrisk)
-            push(queue, (n_cost_and_risk + h, next(c), neighbor, ncost, nrisk, curnode))
+            enqueued[neighbor] = (new_cost, h, new_risk)
+            push(queue, (new_value + h, next(c), neighbor, new_cost, new_risk, curnode))
 
     raise nx.NetworkXNoPath(f"Node {target} not reachable from {source}")
